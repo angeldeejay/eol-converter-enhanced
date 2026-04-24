@@ -15,7 +15,7 @@ This tool was inspired by [nodejs-eol-converter-cli](https://github.com/jurosh/n
 ## Installation
 
 ```bash
-npm i -g eol-converter-enhanced
+npm i -g github:angeldeejay/eol-converter-enhanced
 ```
 
 ## Command
