@@ -4,7 +4,7 @@
   "description": "EOL converter CLI for simple CRLF -> LF (and reverse) conversions of multiple files.",
   "main": "src/index.js",
   "bin": {
-    "eolr": "./src/index.js"
+    "eolc": "./src/index.js"
   },
   "scripts": {
     "start": "node src/index.js"
