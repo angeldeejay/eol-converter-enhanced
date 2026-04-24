@@ -22,7 +22,7 @@ const ANSI_CYAN = '\x1b[36m'
  * @returns {void}
  */
 function printHelp() {
-  console.log('Usage: eolConverter [--lf | --crlf | --check] [-v | --verbose] [--no-color] [--exclude <glob> | --exclude=<glob>]... <target> [<target> ...]')
+  console.log('Usage: eolc [--lf | --crlf | --check] [-v | --verbose] [--no-color] [--exclude <glob> | --exclude=<glob>]... <target> [<target> ...]')
   console.log('')
   console.log('Modes (switches):')
   console.log('  --lf      Convert matched files to LF (default)')
@@ -45,11 +45,11 @@ function printHelp() {
   console.log('  - In conversion modes, text files without line breaks (EOL=NONE) are skipped')
   console.log('')
   console.log('Examples:')
-  console.log('  eolConverter --check "**/*.js" "**/*.ts"')
-  console.log('  eolConverter --check -v . --exclude "**/.git/**"')
-  console.log('  eolConverter --crlf src --exclude "**/*.min.js"')
-  console.log('  eolConverter --lf "C:/work/project/src" --exclude "**/node_modules/**"')
-  console.log('  eolConverter --help')
+  console.log('  eolc --check "**/*.js" "**/*.ts"')
+  console.log('  eolc --check -v . --exclude "**/.git/**"')
+  console.log('  eolc --crlf src --exclude "**/*.min.js"')
+  console.log('  eolc --lf "C:/work/project/src" --exclude "**/node_modules/**"')
+  console.log('  eolc --help')
 }
 
 /**
