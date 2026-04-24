@@ -10,6 +10,11 @@ const path = require('path')
 const TEXT_SAMPLE_BYTES = 8192
 // Max ratio of suspicious control bytes tolerated before treating a file as binary.
 const BINARY_CONTROL_RATIO_THRESHOLD = 0.3
+const ANSI_RESET = '\x1b[0m'
+const ANSI_RED = '\x1b[31m'
+const ANSI_YELLOW = '\x1b[33m'
+const ANSI_MAGENTA = '\x1b[35m'
+const ANSI_CYAN = '\x1b[36m'
 
 /**
  * Print CLI usage, options, and examples.
@@ -17,7 +22,7 @@ const BINARY_CONTROL_RATIO_THRESHOLD = 0.3
  * @returns {void}
  */
 function printHelp() {
-  console.log('Usage: eolConverter [--lf | --crlf | --check] [-v | --verbose] [--exclude <glob> | --exclude=<glob>]... <target> [<target> ...]')
+  console.log('Usage: eolConverter [--lf | --crlf | --check] [-v | --verbose] [--no-color] [--exclude <glob> | --exclude=<glob>]... <target> [<target> ...]')
   console.log('')
   console.log('Modes (switches):')
   console.log('  --lf      Convert matched files to LF (default)')
@@ -31,12 +36,13 @@ function printHelp() {
   console.log('Options:')
   console.log('  -h, --help         Show this help and exit')
   console.log('  -v, --verbose      Show run context and filter counters')
+  console.log('  --no-color         Disable ANSI colors in --check output')
   console.log('  --exclude <glob>   Exclude files matching glob (repeatable)')
   console.log('  --exclude=<glob>   Exclude files matching glob (repeatable)')
   console.log('')
   console.log('Notes:')
   console.log('  - Binary files are automatically skipped using content-based detection')
-  console.log('  - Text files without line breaks (EOL=NONE) are also skipped')
+  console.log('  - In conversion modes, text files without line breaks (EOL=NONE) are skipped')
   console.log('')
   console.log('Examples:')
   console.log('  eolConverter --check "**/*.js" "**/*.ts"')
@@ -56,19 +62,28 @@ function printHelp() {
  * - Positional targets: one or more globs or directory paths
  *
  * @param {string[]} args Raw CLI args (`process.argv.slice(2)`).
- * @returns {{showHelp: true} | {error: string} | {showHelp: false, mode: 'lf'|'crlf'|'check', verbose: boolean, excludeGlobs: string[], inputTargets: string[]}}
+ * @returns {{showHelp: true} | {error: string, exitCode?: number} | {showHelp: false, mode: 'lf'|'crlf'|'check', verbose: boolean, noColor: boolean, excludeGlobs: string[], inputTargets: string[]}}
  */
 function parseArgs(args) {
-  if (args.includes('--help') || args.includes('-h')) {
+  if (args[0] === '--help' || args[0] === '-h') {
     return { showHelp: true }
   }
 
+  if (args.length === 0 || !['--lf', '--crlf', '--check'].includes(args[0])) {
+    return {
+      error: 'ERROR: first argument must be --lf, --crlf, or --check',
+      exitCode: 124,
+    }
+  }
+
+  const initialMode = args[0].slice(2)
   const excludeGlobs = []
   const inputTargets = []
-  const selectedModes = []
+  const selectedModes = [initialMode]
   let verbose = false
-
-  for (let i = 0; i < args.length; i++) {
+  let noColor = false
+  
+  for (let i = 1; i < args.length; i++) {
     const arg = args[i]
 
     if (arg === '-v' || arg === '--verbose') {
@@ -76,7 +91,22 @@ function parseArgs(args) {
       continue
     }
 
+    if (arg === '--no-color') {
+      noColor = true
+      continue
+    }
+
     if (arg === '--exclude') {
+      const nextArg = args[i + 1]
+      if (!nextArg || nextArg.startsWith('-')) {
+        return { error: 'ERROR: --exclude requires a glob pattern' }
+      }
+      excludeGlobs.push(nextArg)
+      i++
+      continue
+    }
+
+    if (arg === '--exclude=') {
       const nextArg = args[i + 1]
       if (!nextArg || nextArg.startsWith('-')) {
         return { error: 'ERROR: --exclude requires a glob pattern' }
@@ -110,6 +140,10 @@ function parseArgs(args) {
       continue
     }
 
+    if (arg.startsWith('-')) {
+      return { error: 'ERROR: unknown option ' + arg }
+    }
+
     inputTargets.push(arg)
   }
 
@@ -125,6 +159,7 @@ function parseArgs(args) {
     showHelp: false,
     mode: selectedModes[0] || 'lf',
     verbose,
+    noColor,
     excludeGlobs,
     inputTargets,
   }
@@ -139,9 +174,23 @@ function parseArgs(args) {
 function createGlobOptions(excludeGlobs) {
   const options = { nodir: true }
   if (excludeGlobs.length > 0) {
-    options.ignore = excludeGlobs
+    options.ignore = excludeGlobs.flatMap(pattern => (
+      pattern.includes('/') || pattern.includes('\\')
+        ? [pattern]
+        : [pattern, '**/' + pattern]
+    ))
   }
   return options
+}
+
+/**
+ * Check whether a target string contains glob syntax.
+ *
+ * @param {string} target CLI target string.
+ * @returns {boolean}
+ */
+function hasGlobMagic(target) {
+  return /[*?[\]{}]/.test(target)
 }
 
 /**
@@ -195,6 +244,31 @@ async function collectFiles(inputTargets, dir, globOptions) {
 }
 
 /**
+ * Validate literal path targets before glob expansion.
+ *
+ * @param {string[]} inputTargets Target args (globs and/or directories).
+ * @param {string} dir Current working directory.
+ * @returns {string | null}
+ */
+function validateInputTargets(inputTargets, dir) {
+  for (const target of inputTargets) {
+    if (hasGlobMagic(target)) {
+      continue
+    }
+
+    const resolvedTarget = path.isAbsolute(target)
+      ? target
+      : path.resolve(dir, target)
+
+    if (!fs.existsSync(resolvedTarget)) {
+      return 'ERROR: target not found: ' + target
+    }
+  }
+
+  return null
+}
+
+/**
  * Print execution context lines shown in verbose mode.
  *
  * @param {string} dir Current working directory.
@@ -217,7 +291,6 @@ function printRunContext(dir, inputTargets, excludeGlobs, isCheck, isCrlf) {
   console.log(isCheck
     ? 'CHECK: will only list files, no action will be performed'
     : 'Converting to ' + (isCrlf ? 'CRLF' : 'LF'))
-  console.log('---')
 }
 
 /**
@@ -320,17 +393,49 @@ function detectFileEol(fileName, dir) {
 }
 
 /**
- * Filter candidate files to processable text files.
+ * Return ANSI color code for one EOL label.
  *
- * Excludes:
- * - likely binary files
- * - text files with EOL=`NONE` (single-line/no line breaks)
+ * @param {'LF'|'CRLF'|'MIXED'|'NONE'} eolLabel Detected EOL label.
+ * @returns {string}
+ */
+function getEolColor(eolLabel) {
+  if (eolLabel === 'LF') {
+    return ANSI_CYAN
+  }
+  if (eolLabel === 'CRLF') {
+    return ANSI_MAGENTA
+  }
+  if (eolLabel === 'NONE') {
+    return ANSI_YELLOW
+  }
+  return ANSI_RED
+}
+
+/**
+ * Wrap one console line with the configured EOL color.
+ *
+ * @param {string} line Printable line content.
+ * @param {'LF'|'CRLF'|'MIXED'|'NONE'} eolLabel Detected EOL label.
+ * @param {boolean} noColor True when ANSI colors are disabled.
+ * @returns {string}
+ */
+function colorizeLine(line, eolLabel, noColor) {
+  if (noColor) {
+    return line
+  }
+
+  return getEolColor(eolLabel) + line + ANSI_RESET
+}
+
+/**
+ * Filter candidate files to processable text files.
  *
  * @param {string[]} files Candidate file list.
  * @param {string} dir Current working directory.
+ * @param {boolean} includeNoneEol True when NONE files should remain in the result.
  * @returns {{processableFiles: string[], skippedBinaryFiles: string[], skippedNoneEolFiles: string[]}}
  */
-function filterProcessableFiles(files, dir) {
+function filterProcessableFiles(files, dir, includeNoneEol = false) {
   const processableFiles = []
   const skippedBinaryFiles = []
   const skippedNoneEolFiles = []
@@ -343,7 +448,7 @@ function filterProcessableFiles(files, dir) {
       }
 
       const currentEol = detectFileEol(fileName, dir)
-      if (currentEol === 'NONE') {
+      if (!includeNoneEol && currentEol === 'NONE') {
         skippedNoneEolFiles.push(fileName)
         return
       }
@@ -384,24 +489,31 @@ function convertFile(fileName, dir, isCrlf) {
  * @param {boolean} isCheck True when in check/list-only mode.
  * @param {boolean} isCrlf True for CRLF conversion target.
  * @param {boolean} verbose True to print trailing delimiter.
+ * @param {boolean} noColor True when ANSI colors are disabled.
  * @returns {void}
  */
-function processFiles(files, dir, isCheck, isCrlf, verbose) {
+function processFiles(files, dir, isCheck, isCrlf, verbose, noColor) {
   files.forEach(fileName => {
     if (isCheck) {
       try {
         const currentEol = detectFileEol(fileName, dir)
         const eolLabel = '[' + currentEol.padStart(5, ' ') + ']'
-        console.log(eolLabel + ' ' + fileName)
+        console.log(colorizeLine(eolLabel + ' ' + fileName, currentEol, noColor))
       } catch (error) {
         console.warn(error)
       }
       return
     }
 
-    console.log(fileName)
     try {
+      const currentEol = detectFileEol(fileName, dir)
+      const targetEol = isCrlf ? 'CRLF' : 'LF'
+      if (currentEol === targetEol) {
+        return
+      }
+
       convertFile(fileName, dir, isCrlf)
+      console.log(fileName)
     } catch (error) {
       console.warn(error)
     }
@@ -428,13 +540,21 @@ async function run() {
 
   if (parsed.error) {
     console.error(parsed.error)
+    process.exitCode = parsed.exitCode || 1
     return
   }
 
-  const { mode, verbose, excludeGlobs, inputTargets } = parsed
+  const { mode, verbose, noColor, excludeGlobs, inputTargets } = parsed
   const isCheck = mode === 'check'
   const isCrlf = mode === 'crlf'
   const dir = process.cwd()
+
+  const invalidTargetError = validateInputTargets(inputTargets, dir)
+  if (invalidTargetError) {
+    console.error(invalidTargetError)
+    process.exitCode = 1
+    return
+  }
 
   if (verbose) {
     printRunContext(dir, inputTargets, excludeGlobs, isCheck, isCrlf)
@@ -444,11 +564,17 @@ async function run() {
   const files = await collectFiles(inputTargets, dir, globOptions)
 
   if (files.length === 0) {
-    console.error('ERROR: no files found')
+    if (verbose) {
+      console.log('No files found')
+    }
     return
   }
 
-  const { processableFiles, skippedBinaryFiles, skippedNoneEolFiles } = filterProcessableFiles(files, dir)
+  const { processableFiles, skippedBinaryFiles, skippedNoneEolFiles } = filterProcessableFiles(
+    files,
+    dir,
+    isCheck
+  )
 
   if (verbose && skippedBinaryFiles.length > 0) {
     console.log('Skipped binary files: ' + skippedBinaryFiles.length)
@@ -458,12 +584,21 @@ async function run() {
     console.log('Skipped NONE EOL files: ' + skippedNoneEolFiles.length)
   }
 
+  if (verbose) {
+    console.log('---')
+  }
+
   if (processableFiles.length === 0) {
-    console.error('ERROR: no processable text files found after filters')
+    if (verbose) {
+      console.log('No processable text files found after filters')
+    }
     return
   }
 
-  processFiles(processableFiles, dir, isCheck, isCrlf, verbose)
+  processFiles(processableFiles, dir, isCheck, isCrlf, verbose, noColor)
 }
 
-run()
+run().catch(error => {
+  console.error(error)
+  process.exitCode = 1
+})
